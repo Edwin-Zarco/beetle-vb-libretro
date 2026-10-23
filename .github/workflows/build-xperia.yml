@@ -122,7 +122,12 @@ jobs:
             APP_CFLAGS="$OPT_FLAGS" APP_CPPFLAGS="$OPT_FLAGS $CXX_OPT_FLAGS" \
             APP_LDFLAGS="$LD_OPT_FLAGS"
 
+      - name: Rename core for RetroArch
+        run: |
+          mkdir -p out
+          cp libs/armeabi-v7a/libretro.so out/mednafen_vb_libretro_android.so
+
       - uses: actions/upload-artifact@v7
         with:
-          name: mednafen_vb_libretro_android-armv7-neon
-          path: libs/armeabi-v7a/libretro.so
+          name: mednafen_vb_libretro_android
+          path: out/mednafen_vb_libretro_android.so
