@@ -158,6 +158,15 @@ jobs:
           add-to-path: false
           local-cache: true
 
+      - name: Verify NDK toolchain
+        run: |
+          CLANG="${{ steps.ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/clang++"
+          if [ ! -x "$CLANG" ]; then
+            echo "::error::NDK is incomplete (missing $CLANG). Delete the Actions cache and rerun."
+            exit 1
+          fi
+          "$CLANG" --version
+
       - name: Patch jni/Android.mk (ARM mode, no exceptions/RTTI)
         run: |
           sed -i '/^LOCAL_MODULE/a LOCAL_ARM_MODE := arm' jni/Android.mk
