@@ -6,19 +6,28 @@ on:
   workflow_dispatch:
 
 env:
+  # The VR/stereo-GL path is only compiled when GLES is on. A phone build that
+  # plays normal Virtual Boy output doesn't need it, so it's off by default.
+  # Set both to 1 to restore the core's stock Android behaviour.
+  ENABLE_GLES: "0"
+  ENABLE_VR: "0"
+
   # Cortex-A8 (Scorpion) + NEON, softfp ABI as required by armeabi-v7a
   OPT_FLAGS: >-
-    -O3 -marm
+    -O3 -marm -DNDEBUG
     -mcpu=cortex-a8 -mtune=cortex-a8 -mfpu=neon -mfloat-abi=softfp
     -ffast-math -fno-math-errno -funroll-loops
     -fvectorize -fslp-vectorize
     -fomit-frame-pointer -fno-stack-protector -fno-ident -fno-plt
-    -fmerge-all-constants -fno-asynchronous-unwind-tables
+    -fmerge-all-constants -fvisibility=hidden
+    -fno-unwind-tables -fno-asynchronous-unwind-tables
     -fdata-sections -ffunction-sections -flto
+  # The core source has no try/throw/catch/dynamic_cast/typeid and no std:: use.
+  CXX_OPT_FLAGS: -fno-exceptions -fno-rtti
   LD_OPT_FLAGS: >-
     -flto -Wl,--lto-O3 -Wl,--gc-sections -Wl,--icf=all -Wl,-O2
     -Wl,--as-needed -Wl,--hash-style=both -Wl,--build-id=none
-    -Wl,-z,norelro
+    -Wl,-z,norelro -Wl,--exclude-libs,ALL
 
 jobs:
   build:
@@ -27,17 +36,19 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
-      - name: Setup NDK r23c
+      - name: Setup NDK r23c (cached)
         id: ndk
         uses: nttld/setup-ndk@v1
         with:
           ndk-version: r23c
           add-to-path: false
+          local-cache: true
 
-      - name: Force ARM mode (ndk-build defaults to Thumb)
+      - name: Patch jni/Android.mk (ARM mode, no exceptions/RTTI)
         run: |
           sed -i '/^LOCAL_MODULE/a LOCAL_ARM_MODE := arm' jni/Android.mk
-          grep -n "LOCAL_MODULE\|LOCAL_ARM_MODE" jni/Android.mk
+          sed -i '/^LOCAL_CPP_FEATURES/d' jni/Android.mk
+          grep -n "LOCAL_MODULE\|LOCAL_ARM_MODE\|LOCAL_CPP_FEATURES" jni/Android.mk || true
 
       - name: Build (official ndk-build in jni/)
         working-directory: jni
@@ -51,24 +62,26 @@ jobs:
             APP_PLATFORM=android-16 \
             APP_STL=c++_static \
             APP_OPTIM=release \
-            HAVE_GLES=1 \
+            HAVE_GLES="$ENABLE_GLES" \
+            HAVE_VR="$ENABLE_VR" \
             APP_CFLAGS="$OPT_FLAGS" \
-            APP_CPPFLAGS="$OPT_FLAGS" \
+            APP_CPPFLAGS="$OPT_FLAGS $CXX_OPT_FLAGS" \
             APP_LDFLAGS="$LD_OPT_FLAGS"
 
       - name: Verify ARM/Thumb, NEON and symbols
         run: |
           BIN="${{ steps.ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin"
-          # Unstripped copy keeps the $a/$t mapping symbols; libs/ is stripped.
           UNSTRIPPED=obj/local/armeabi-v7a/libretro.so
           SO=libs/armeabi-v7a/libretro.so
           echo "ARM-mode symbols:   $($BIN/llvm-readelf -s $UNSTRIPPED | grep -c ' \$a')"
           echo "Thumb-mode symbols: $($BIN/llvm-readelf -s $UNSTRIPPED | grep -c ' \$t')"
-          $BIN/llvm-readelf -A $SO | grep -E "CPU_name|Advanced_SIMD|FP_arch|THUMB_ISA" || true
+          $BIN/llvm-readelf -A $SO
           echo "--- needed libs ---"
           $BIN/llvm-readelf -d $SO | grep NEEDED
-          echo "--- undefined symbols (check against Android 4.0.4 libc/libm/libdl/liblog/libGLESv2) ---"
+          echo "--- undefined symbols ---"
           $BIN/llvm-nm -D --undefined-only $SO
+          echo "--- NEON instruction count (q-register ops) ---"
+          $BIN/llvm-objdump -d $UNSTRIPPED | grep -cE '\sv[a-z0-9.]+\s+q[0-9]' || true
 
       - name: Package core
         run: |
