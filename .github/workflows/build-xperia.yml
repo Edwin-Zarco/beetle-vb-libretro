@@ -156,13 +156,18 @@ jobs:
         with:
           ndk-version: r23c
           add-to-path: false
-          local-cache: true
+          # local-cache removed temporarily: a broken cached NDK was being restored
+          # on every run. Re-add 'local-cache: true' once a fresh download builds.
 
       - name: Verify NDK toolchain
         run: |
-          CLANG="${{ steps.ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/clang++"
+          NDKDIR="${{ steps.ndk.outputs.ndk-path }}"
+          echo "NDK path: $NDKDIR"
+          ls "$NDKDIR" || true
+          ls "$NDKDIR/toolchains/llvm/prebuilt/" 2>/dev/null || echo "(no prebuilt dir)"
+          CLANG="$NDKDIR/toolchains/llvm/prebuilt/linux-x86_64/bin/clang++"
           if [ ! -x "$CLANG" ]; then
-            echo "::error::NDK is incomplete (missing $CLANG). Delete the Actions cache and rerun."
+            echo "::error::NDK is incomplete (missing $CLANG). The NDK download is incomplete."
             exit 1
           fi
           "$CLANG" --version
