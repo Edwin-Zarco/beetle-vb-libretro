@@ -6,22 +6,18 @@ on:
   workflow_dispatch:
 
 env:
-  # The VR/stereo-GL path is only compiled when GLES is on. A phone build that
-  # plays normal Virtual Boy output doesn't need it, so it's off by default.
+  # GL/VR are off: the default Virtual Boy output is software-rendered.
   ENABLE_GLES: "0"
   ENABLE_VR: "0"
-
-  # Cortex-A8 (Scorpion) + NEON, softfp ABI as required by armeabi-v7a
+  # Cortex-A8 + NEON, softfp ABI for armeabi-v7a.
   OPT_FLAGS: >-
     -O3 -marm -DNDEBUG
     -mcpu=cortex-a8 -mtune=cortex-a8 -mfpu=neon -mfloat-abi=softfp
-    -ffast-math -fno-math-errno -funroll-loops
-    -fvectorize -fslp-vectorize
+    -ffast-math -fno-math-errno -funroll-loops -fvectorize -fslp-vectorize
     -fomit-frame-pointer -fno-stack-protector -fno-ident -fno-plt
     -fmerge-all-constants -fvisibility=hidden
     -fno-unwind-tables -fno-asynchronous-unwind-tables
     -fdata-sections -ffunction-sections -flto
-  # The core source has no try/throw/catch/dynamic_cast/typeid and no std:: use.
   CXX_OPT_FLAGS: -fno-exceptions -fno-rtti
   LD_OPT_FLAGS: >-
     -flto -Wl,--lto-O3 -Wl,--gc-sections -Wl,--icf=all -Wl,-O2
@@ -32,16 +28,13 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v7
+      - uses: actions/checkout@v7
 
-      # Source optimisation: replaces the per-pixel framebuffer expansion in
-      # vip.c with a byte -> 4-pixel lookup table. The patch is embedded
-      # below, so the repo needs no extra files. --check runs first, so a
-      # changed upstream file fails with a clear error, not a partial patch.
+      # Replaces the per-pixel framebuffer expansion in vip.c with a
+      # byte -> 4-pixel lookup table. Patch and test are embedded here.
       - name: Test expansion equivalence (host)
         run: |
-          cat > /tmp/vb-anaglyph-lut-test.c <<'TEST_EOF'
+          cat > /tmp/eqtest.c <<'TEST_EOF'
           #include <stdio.h>
           #include <stdlib.h>
           #include <stdint.h>
@@ -63,10 +56,10 @@ jobs:
             printf("equivalent over all bytes, 10000 random palettes\n"); return 0;
           }
           TEST_EOF
-          gcc -O2 -Wall -o /tmp/eqtest /tmp/vb-anaglyph-lut-test.c
+          gcc -O2 -Wall -o /tmp/eqtest /tmp/eqtest.c
           /tmp/eqtest
 
-      - name: Apply source patch (anaglyph LUT)
+      - name: Apply anaglyph LUT patch
         run: |
           cat > /tmp/vb-anaglyph-lut.patch <<'PATCH_EOF'
           --- a/mednafen/vb/vip.c
@@ -148,43 +141,24 @@ jobs:
           PATCH_EOF
           git apply --check /tmp/vb-anaglyph-lut.patch
           git apply /tmp/vb-anaglyph-lut.patch
-          grep -c "Byte4LUT" mednafen/vb/vip.c
 
-      - name: Setup NDK r23c (cached)
+      - name: Setup NDK r23c
         id: ndk
         uses: nttld/setup-ndk@v1
         with:
           ndk-version: r23c
           add-to-path: false
-          # local-cache removed temporarily: a broken cached NDK was being restored
-          # on every run. Re-add 'local-cache: true' once a fresh download builds.
 
-      - name: Verify NDK toolchain
-        run: |
-          NDKDIR="${{ steps.ndk.outputs.ndk-path }}"
-          echo "NDK path: $NDKDIR"
-          ls "$NDKDIR" || true
-          ls "$NDKDIR/toolchains/llvm/prebuilt/" 2>/dev/null || echo "(no prebuilt dir)"
-          CLANG="$NDKDIR/toolchains/llvm/prebuilt/linux-x86_64/bin/clang++"
-          if [ ! -x "$CLANG" ]; then
-            echo "::error::NDK is incomplete (missing $CLANG). The NDK download is incomplete."
-            exit 1
-          fi
-          "$CLANG" --version
-
-      - name: Patch jni/Android.mk (ARM mode, no exceptions/RTTI)
+      - name: Force ARM mode and drop exceptions in Android.mk
         run: |
           sed -i '/^LOCAL_MODULE/a LOCAL_ARM_MODE := arm' jni/Android.mk
           sed -i '/^LOCAL_CPP_FEATURES/d' jni/Android.mk
-          grep -n "LOCAL_MODULE\|LOCAL_ARM_MODE\|LOCAL_CPP_FEATURES" jni/Android.mk || true
 
-      - name: Build (official ndk-build in jni/)
+      - name: Build
         working-directory: jni
         env:
           NDK: ${{ steps.ndk.outputs.ndk-path }}
         run: |
-          # r23c's minimum platform is android-16; the code runs on 4.0.4 (API 15)
-          # as long as no API 16+ symbols are pulled in.
           "$NDK/ndk-build" -j"$(nproc)" \
             APP_ABI=armeabi-v7a \
             APP_PLATFORM=android-16 \
@@ -196,30 +170,18 @@ jobs:
             APP_CPPFLAGS="$OPT_FLAGS $CXX_OPT_FLAGS" \
             APP_LDFLAGS="$LD_OPT_FLAGS"
 
-      - name: Verify ARM/Thumb, NEON and symbols
+      - name: Verify build
         run: |
           BIN="${{ steps.ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin"
-          UNSTRIPPED=obj/local/armeabi-v7a/libretro.so
           SO=libs/armeabi-v7a/libretro.so
-          echo "ARM-mode symbols:   $($BIN/llvm-readelf -s $UNSTRIPPED | grep -c ' \$a')"
-          echo "Thumb-mode symbols: $($BIN/llvm-readelf -s $UNSTRIPPED | grep -c ' \$t')"
-          $BIN/llvm-readelf -A $SO
-          echo "--- needed libs ---"
+          $BIN/llvm-readelf -A $SO | grep -E "Tag_CPU_arch|FP_arch"
           $BIN/llvm-readelf -d $SO | grep NEEDED
-          echo "--- undefined symbols ---"
           $BIN/llvm-nm -D --undefined-only $SO
-          echo "--- NEON instruction count (q-register ops) ---"
-          $BIN/llvm-objdump -d $UNSTRIPPED | grep -cE '\sv[a-z0-9.]+\s+q[0-9]' || true
+          echo "NEON instructions: $($BIN/llvm-objdump -d obj/local/armeabi-v7a/libretro.so | grep -cE '\sv[a-z0-9.]+\s+q[0-9]' || true)"
 
-      - name: Package core
-        run: |
-          mkdir -p out
-          cp libs/armeabi-v7a/libretro.so out/mednafen_vb_libretro_android.so
-          ls -lh out
-
-      - name: Upload artifact
+      - name: Upload core
         uses: actions/upload-artifact@v7
         with:
           name: mednafen_vb_libretro_android-armv7-neon
-          path: out/mednafen_vb_libretro_android.so
+          path: libs/armeabi-v7a/libretro.so
           if-no-files-found: error
