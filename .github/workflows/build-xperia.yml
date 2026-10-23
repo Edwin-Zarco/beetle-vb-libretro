@@ -8,7 +8,6 @@ on:
 env:
   # The VR/stereo-GL path is only compiled when GLES is on. A phone build that
   # plays normal Virtual Boy output doesn't need it, so it's off by default.
-  # Set both to 1 to restore the core's stock Android behaviour.
   ENABLE_GLES: "0"
   ENABLE_VR: "0"
 
@@ -35,6 +34,121 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+
+      # Source optimisation: replaces the per-pixel framebuffer expansion in
+      # vip.c with a byte -> 4-pixel lookup table. The patch is embedded
+      # below, so the repo needs no extra files. --check runs first, so a
+      # changed upstream file fails with a clear error, not a partial patch.
+      - name: Test expansion equivalence (host)
+        run: |
+          cat > /tmp/vb-anaglyph-lut-test.c <<'TEST_EOF'
+          #include <stdio.h>
+          #include <stdlib.h>
+          #include <stdint.h>
+          /* Old: per-pixel loop; New: LUT. Brightness CLUT random. */
+          static uint32_t BrightCLUT[2][4], Byte4LUT[2][256][4];
+          int main(void){
+            srand(1);
+            for(int trial=0; trial<10000; trial++){
+              for(int lr=0;lr<2;lr++) for(int i=0;i<4;i++) BrightCLUT[lr][i]=(uint32_t)rand()*2654435761u;
+              for(int lr=0;lr<2;lr++) for(int i=0;i<256;i++) for(int k=0;k<4;k++)
+                Byte4LUT[lr][i][k]=BrightCLUT[lr][(i>>(2*k))&3];
+              for(int lr=0;lr<2;lr++) for(int b=0;b<256;b++){
+                uint32_t old_out[4], new_out[4], bits=b;
+                for(int k=0;k<4;k++){ old_out[k]=BrightCLUT[lr][bits&3]; bits>>=2; }
+                for(int k=0;k<4;k++) new_out[k]=Byte4LUT[lr][b][k];
+                for(int k=0;k<4;k++) if(old_out[k]!=new_out[k]){ printf("MISMATCH\n"); return 1; }
+              }
+            }
+            printf("equivalent over all bytes, 10000 random palettes\n"); return 0;
+          }
+          TEST_EOF
+          gcc -O2 -Wall -o /tmp/eqtest /tmp/vb-anaglyph-lut-test.c
+          /tmp/eqtest
+
+      - name: Apply source patch (anaglyph LUT)
+        run: |
+          cat > /tmp/vb-anaglyph-lut.patch <<'PATCH_EOF'
+          --- a/mednafen/vb/vip.c
+          +++ b/mednafen/vb/vip.c
+          @@ -92,6 +92,10 @@
+           static uint32 ColorLUT[2][256];
+           static int32 BrightnessCache[4];
+           static uint32 BrightCLUT[2][4];
+          +/* Byte4LUT[lr][b][k] = pixel for 2-bit colour index (b >> 2k) & 3.
+          + * Rebuilt whenever BrightCLUT is rebuilt, so the copy loops can expand
+          + * four framebuffer pixels per table lookup. */
+          +static uint32 Byte4LUT[2][256][4];
+           
+           static double ColorLUTNoGC[2][256][3];
+           static uint32 AnaSlowColorLUT[256][256];
+          @@ -220,6 +224,14 @@
+              for(lr = 0; lr < 2; lr++)
+                 for(i = 0; i < 4; i++)
+                    BrightCLUT[lr][i] = ColorLUT[lr][BrightnessCache[i]];
+          +
+          +   for(lr = 0; lr < 2; lr++)
+          +      for(i = 0; i < 256; i++)
+          +      {
+          +         int k;
+          +         for(k = 0; k < 4; k++)
+          +            Byte4LUT[lr][i][k] = BrightCLUT[lr][(i >> (2 * k)) & 3];
+          +      }
+           }
+           
+           static void Recalc3DModeStuff(bool non_rgb_output)
+          @@ -872,16 +884,14 @@
+                 {
+                    for(y = 56; y; y--)
+                    {
+          -            uint32 source_bits = *fb_source;
+          +            const uint32 *px = Byte4LUT[lr][*fb_source];
+          +
+          +            target[0 * pitchinpix] |= px[0];
+          +            target[1 * pitchinpix] |= px[1];
+          +            target[2 * pitchinpix] |= px[2];
+          +            target[3 * pitchinpix] |= px[3];
+           
+          -            for(y_sub = 4; y_sub; y_sub--)
+          -            {
+          -               uint32 pixel  = BrightCLUT[lr][source_bits & 3];
+          -               *target      |= pixel;
+          -
+          -               source_bits >>= 2;
+          -               target       += pitchinpix;
+          -            }
+          +            target += 4 * pitchinpix;
+                       fb_source++;
+                    }
+                 }
+          @@ -889,16 +899,14 @@
+                 {
+                    for(y = 56; y; y--)
+                    {
+          -            uint32 source_bits = *fb_source;
+          +            const uint32 *px = Byte4LUT[lr][*fb_source];
+          +
+          +            target[0 * pitchinpix] = px[0];
+          +            target[1 * pitchinpix] = px[1];
+          +            target[2 * pitchinpix] = px[2];
+          +            target[3 * pitchinpix] = px[3];
+           
+          -            for(y_sub = 4; y_sub; y_sub--)
+          -            {
+          -               uint32 pixel  = BrightCLUT[lr][source_bits & 3];
+          -               *target       = pixel;
+          -
+          -               source_bits >>= 2;
+          -               target       += pitchinpix;
+          -            }
+          +            target += 4 * pitchinpix;
+                       fb_source++;
+                    }
+                 }
+          PATCH_EOF
+          git apply --check /tmp/vb-anaglyph-lut.patch
+          git apply /tmp/vb-anaglyph-lut.patch
+          grep -c "Byte4LUT" mednafen/vb/vip.c
 
       - name: Setup NDK r23c (cached)
         id: ndk
