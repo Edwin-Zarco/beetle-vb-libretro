@@ -1,0 +1,62 @@
+name: Build beetle-vb (Xperia Play / Android 4.0.4)
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+env:
+  # Cortex-A8 (Scorpion) + NEON, softfp ABI as required by armeabi-v7a
+  OPT_FLAGS: >-
+    -O3 -marm
+    -mcpu=cortex-a8 -mtune=cortex-a8 -mfpu=neon -mfloat-abi=softfp
+    -ffast-math -fno-math-errno -funroll-loops -fomit-frame-pointer
+    -fno-stack-protector -fno-ident -fno-plt
+    -fdata-sections -ffunction-sections -flto
+  LD_OPT_FLAGS: >-
+    -flto -Wl,--gc-sections -Wl,--hash-style=both -Wl,-O2 -Wl,--icf=all
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup NDK r23c
+        id: ndk
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r23c
+          add-to-path: false
+
+      - name: Build (official ndk-build in jni/)
+        working-directory: jni
+        env:
+          NDK: ${{ steps.ndk.outputs.ndk-path }}
+        run: |
+          # r23c's minimum platform is android-16; the code runs on 4.0.4 (API 15)
+          # as long as no API 16+ symbols are pulled in.
+          "$NDK/ndk-build" -j"$(nproc)" \
+            APP_ABI=armeabi-v7a \
+            APP_PLATFORM=android-16 \
+            APP_STL=c++_static \
+            APP_OPTIM=release \
+            HAVE_GLES=1 \
+            APP_CFLAGS="$OPT_FLAGS" \
+            APP_CPPFLAGS="$OPT_FLAGS" \
+            APP_LDFLAGS="$LD_OPT_FLAGS"
+
+      - name: Package core
+        run: |
+          mkdir -p out
+          cp libs/armeabi-v7a/libretro.so out/mednafen_vb_libretro_android.so
+          "${{ steps.ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf" -A out/mednafen_vb_libretro_android.so | head -30
+          ls -lh out
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: mednafen_vb_libretro_android-armv7-neon
+          path: out/mednafen_vb_libretro_android.so
+          if-no-files-found: error
